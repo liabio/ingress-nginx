@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
+	"k8s.io/ingress-nginx/pkg/apis/ingressgroup/v1"
 	"reflect"
 	"sort"
 	"sync"
@@ -50,6 +51,8 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
 	ngx_config "k8s.io/ingress-nginx/internal/ingress/controller/config"
 	ngx_template "k8s.io/ingress-nginx/internal/ingress/controller/template"
+	inggroupInformers "k8s.io/ingress-nginx/pkg/client/informers/externalversions"
+	customclient "k8s.io/ingress-nginx/pkg/client/clientset/versioned"
 	"k8s.io/ingress-nginx/internal/ingress/defaults"
 	"k8s.io/ingress-nginx/internal/ingress/errors"
 	"k8s.io/ingress-nginx/internal/ingress/resolver"
@@ -80,6 +83,9 @@ type Storer interface {
 
 	// ListIngresses returns a list of all Ingresses in the store.
 	ListIngresses(IngressFilterFunc) []*ingress.Ingress
+
+	// ListIngressGroups returns a list of all IngressGroups in the store.
+	ListIngressGroups() []*v1.IngressGroup
 
 	// GetRunningControllerPodsCount returns the number of Running ingress-nginx controller Pods.
 	GetRunningControllerPodsCount() int
@@ -124,6 +130,7 @@ type Event struct {
 
 // Informer defines the required SharedIndexInformers that interact with the API server.
 type Informer struct {
+	IngressGroup cache.SharedIndexInformer
 	Ingress   cache.SharedIndexInformer
 	Endpoint  cache.SharedIndexInformer
 	Service   cache.SharedIndexInformer
@@ -134,6 +141,7 @@ type Informer struct {
 
 // Lister contains object listers (stores).
 type Lister struct {
+	IngressGroup          IngressGroupLister
 	Ingress               IngressLister
 	Service               ServiceLister
 	Endpoint              EndpointLister
@@ -184,6 +192,13 @@ func (i *Informer) Run(stopCh chan struct{}) {
 	) {
 		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 	}
+
+	go i.IngressGroup.Run(stopCh)
+	if !cache.WaitForCacheSync(stopCh,
+		i.IngressGroup.HasSynced,
+	) {
+		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+	}
 }
 
 // k8sStore internal Storer implementation using informers and thread safe stores
@@ -229,6 +244,7 @@ func New(
 	namespace, configmap, tcp, udp, defaultSSLCertificate string,
 	resyncPeriod time.Duration,
 	client clientset.Interface,
+	customclient *customclient.Clientset,
 	updateCh *channels.RingChannel,
 	pod *k8s.PodInfo,
 	disableCatchAll bool) Storer {
@@ -270,6 +286,14 @@ func New(
 	} else {
 		store.informers.Ingress = infFactory.Extensions().V1beta1().Ingresses().Informer()
 	}
+
+	//ingress group informer
+	inggroupFactory := inggroupInformers.NewSharedInformerFactoryWithOptions(customclient, resyncPeriod,
+		inggroupInformers.WithNamespace(namespace),
+		inggroupInformers.WithTweakListOptions(func(*metav1.ListOptions) {}))
+
+	store.informers.IngressGroup = inggroupFactory.Cr().V1().IngressGroups().Informer()
+	store.listers.IngressGroup.Store = store.informers.IngressGroup.GetStore()
 
 	store.listers.Ingress.Store = store.informers.Ingress.GetStore()
 
@@ -802,6 +826,25 @@ func (s *k8sStore) ListIngresses(filter IngressFilterFunc) []*ingress.Ingress {
 	})
 
 	return ingresses
+}
+
+// ListIngressGroups returns the list of IngressGroups
+func (s *k8sStore) ListIngressGroups() []*v1.IngressGroup {
+	// filter ingress group rules
+	ingGroups := make([]*v1.IngressGroup, 0)
+	for _, item := range s.listers.IngressGroup.List() {
+		ig := item.(*v1.IngressGroup)
+		ingGroups = append(ingGroups, ig)
+	}
+
+	// sort IngressGroups using the CreationTimestamp field
+	sort.SliceStable(ingGroups, func(i, j int) bool {
+		ir := ingGroups[i].CreationTimestamp
+		jr := ingGroups[j].CreationTimestamp
+		return ir.Before(&jr)
+	})
+
+	return ingGroups
 }
 
 // GetLocalSSLCert returns the local copy of a SSLCert

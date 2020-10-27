@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"k8s.io/ingress-nginx/pkg/ingressgroup"
 	"math/rand"
 	"net/http"
 	"net/http/pprof"
@@ -28,7 +29,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-
+	extensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	customclient "k8s.io/ingress-nginx/pkg/client/clientset/versioned"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -70,9 +72,22 @@ func main() {
 		klog.Fatal(err)
 	}
 
-	kubeClient, err := createApiserverClient(conf.APIServerHost, conf.RootCAFile, conf.KubeConfigFile)
+	kubeClient, extensionCRClient, customClient, err := createApiserverClient(conf.APIServerHost, conf.RootCAFile, conf.KubeConfigFile)
 	if err != nil {
 		handleFatalInitError(err)
+	}
+
+	conf.Customclient = *customClient
+
+	//create ingressgroup crd
+	err = ingressgroup.CreateIngressGroupCRD(extensionCRClient)
+	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			klog.Infof("ingress group crd is already created.")
+		} else {
+			fmt.Fprint(os.Stderr, err)
+			klog.Fatal(err)
+		}
 	}
 
 	if len(conf.DefaultService) > 0 {
@@ -172,10 +187,10 @@ func handleSigterm(ngx *controller.NGINXController, exit exiter) {
 // If neither apiserverHost nor kubeConfig is passed in, we assume the
 // controller runs inside Kubernetes and fallback to the in-cluster config. If
 // the in-cluster config is missing or fails, we fallback to the default config.
-func createApiserverClient(apiserverHost, rootCAFile, kubeConfig string) (*kubernetes.Clientset, error) {
+func createApiserverClient(apiserverHost, rootCAFile, kubeConfig string) (*kubernetes.Clientset, *extensionsclient.Clientset, *customclient.Clientset, error) {
 	cfg, err := clientcmd.BuildConfigFromFlags(apiserverHost, kubeConfig)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	if apiserverHost != "" && rootCAFile != "" {
@@ -190,11 +205,23 @@ func createApiserverClient(apiserverHost, rootCAFile, kubeConfig string) (*kuber
 		cfg.TLSClientConfig = tlsClientConfig
 	}
 
+	// create crd extension client
+	extensionCRClient, err := extensionsclient.NewForConfig(cfg)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create extensionCRClient is error: %v", err)
+	}
+
+	// create custom crd client
+	customClient, err := customclient.NewForConfig(cfg)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create customClient is error: %v", err)
+	}
+
 	klog.Infof("Creating API client for %s", cfg.Host)
 
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	var v *discovery.Info
@@ -226,7 +253,7 @@ func createApiserverClient(apiserverHost, rootCAFile, kubeConfig string) (*kuber
 
 	// err is returned in case of timeout in the exponential backoff (ErrWaitTimeout)
 	if err != nil {
-		return nil, lastErr
+		return nil, nil, nil, lastErr
 	}
 
 	// this should not happen, warn the user
@@ -237,7 +264,7 @@ func createApiserverClient(apiserverHost, rootCAFile, kubeConfig string) (*kuber
 	klog.Infof("Running in Kubernetes cluster version v%v.%v (%v) - git (%v) commit %v - platform %v",
 		v.Major, v.Minor, v.GitVersion, v.GitTreeState, v.GitCommit, v.Platform)
 
-	return client, nil
+	return client, extensionCRClient, customClient, nil
 }
 
 // Handler for fatal init errors. Prints a verbose error message and exits.

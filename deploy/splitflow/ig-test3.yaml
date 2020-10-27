@@ -1,0 +1,11 @@
+apiVersion: harmonycloud.cn/v1
+kind: IngressGroup
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: ingress-controller-liliangfplitflow
+  name: test15-splitflow
+  namespace: kube-system
+spec:
+  services:
+  - name: split-nginx-old
+    namespace: yizhiya-dev53

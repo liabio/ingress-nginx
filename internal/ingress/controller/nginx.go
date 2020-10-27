@@ -70,6 +70,11 @@ const (
 	emptyUID         = "-1"
 )
 
+var (
+	tmplPath = "/etc/nginx/template/nginx.tmpl"
+	//ingressGroupUpstreamTmplPath = "/etc/nginx/template/ingressgroup-upstream.tmpl"
+)
+
 // NewNGINXController creates a new NGINX Ingress controller.
 func NewNGINXController(config *Configuration, mc metric.Collector) *NGINXController {
 	eventBroadcaster := record.NewBroadcaster()
@@ -132,6 +137,7 @@ func NewNGINXController(config *Configuration, mc metric.Collector) *NGINXContro
 		config.DefaultSSLCertificate,
 		config.ResyncPeriod,
 		config.Client,
+		&config.Customclient,
 		n.updateCh,
 		pod,
 		config.DisableCatchAll)
@@ -239,6 +245,8 @@ type NGINXController struct {
 	// runningConfig contains the running configuration in the Backend
 	runningConfig *ingress.Configuration
 
+	// runningIngressGroupConfig contains the running configuration in the Backend
+	runningIngressGroupConfig *ingress.Configuration
 	t ngx_template.TemplateWriter
 
 	resolver []net.IP

@@ -1,0 +1,19 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  labels:
+    app: nginx
+    harmonycloud.cn/app: split-nginx-new
+  annotations:
+    kubernetes.io/ingress.class: ingress-controller-liliangfplitflow
+  name: test01
+  namespace: yizhiya-dev53
+spec:
+  rules:
+  - host: com.test
+    http:
+      paths:
+      - backend:
+          serviceName: split-nginx-new
+          servicePort: 80
+        path: /

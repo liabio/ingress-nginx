@@ -18,11 +18,13 @@ package controller
 
 import (
 	"fmt"
+	"k8s.io/ingress-nginx/pkg/apis/ingressgroup/v1"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
+	customclient "k8s.io/ingress-nginx/pkg/client/clientset/versioned"
 	"github.com/mitchellh/hashstructure"
 	apiv1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1beta1"
@@ -33,6 +35,7 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/class"
+	inggroupclass "k8s.io/ingress-nginx/internal/ingressgroup/annotations/class"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/log"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/proxy"
 	ngx_config "k8s.io/ingress-nginx/internal/ingress/controller/config"
@@ -55,6 +58,7 @@ type Configuration struct {
 	KubeConfigFile string
 
 	Client clientset.Interface
+	Customclient   customclient.Clientset
 
 	ResyncPeriod time.Duration
 
@@ -121,8 +125,22 @@ func (n *NGINXController) syncIngress(interface{}) error {
 		return nil
 	}
 
+	//get ns/service from ingress group
+	ingGroups := n.store.ListIngressGroups()
+
+	//filter ingress group
+	var handleIngGroups []*v1.IngressGroup
+	for _, ingGroup := range ingGroups {
+		if !inggroupclass.IsValid(ingGroup) {
+			continue
+		}
+		handleIngGroups = append(handleIngGroups, ingGroup)
+	}
+
+	ingGroupUpstreams := n.getIngressGroupBackendServers(handleIngGroups)
+
 	ings := n.store.ListIngresses(nil)
-	hosts, servers, pcfg := n.getConfiguration(ings)
+	hosts, servers, pcfg := n.getConfiguration(ings, ingGroupUpstreams)
 
 	n.metricCollector.SetSSLExpireTime(servers)
 
@@ -228,7 +246,7 @@ func (n *NGINXController) CheckIngress(ing *networking.Ingress) error {
 		ParsedAnnotations: annotations.NewAnnotationExtractor(n.store).Extract(ing),
 	})
 
-	_, _, pcfg := n.getConfiguration(ings)
+	_, _, pcfg := n.getConfiguration(ings, nil)
 
 	cfg := n.store.GetBackendConfiguration()
 	cfg.Resolver = n.resolver
@@ -401,7 +419,7 @@ func (n *NGINXController) getDefaultUpstream() *ingress.Backend {
 }
 
 // getConfiguration returns the configuration matching the standard kubernetes ingress
-func (n *NGINXController) getConfiguration(ingresses []*ingress.Ingress) (sets.String, []*ingress.Server, *ingress.Configuration) {
+func (n *NGINXController) getConfiguration(ingresses []*ingress.Ingress, ingGroupUpstreams []*ingress.Backend) (sets.String, []*ingress.Server, *ingress.Configuration) {
 	upstreams, servers := n.getBackendServers(ingresses)
 	var passUpstreams []*ingress.SSLPassthroughBackend
 
@@ -435,6 +453,11 @@ func (n *NGINXController) getConfiguration(ingresses []*ingress.Ingress) (sets.S
 			})
 			break
 		}
+	}
+
+	//把分流服务组的upstream加入
+	if ingGroupUpstreams != nil {
+		upstreams = append(upstreams, ingGroupUpstreams...)
 	}
 
 	return hosts, servers, &ingress.Configuration{
@@ -695,6 +718,83 @@ func (n *NGINXController) getBackendServers(ingresses []*ingress.Ingress) ([]*in
 	return aUpstreams, aServers
 }
 
+
+// getIngressGroupBackendServers returns a list of Upstream to be used by the
+// backend from ingress group
+func (n *NGINXController) getIngressGroupBackendServers(ingressGroups []*v1.IngressGroup) []*ingress.Backend {
+
+	upstreams := n.createIngressGroupUpstreams(ingressGroups)
+
+	//convert *ingress.Backend in map to slice
+	ingressGroupUpstreams := make([]*ingress.Backend, 0, len(upstreams))
+
+	for _, upstream := range upstreams {
+
+		if len(upstream.Endpoints) == 0 {
+			continue
+		}
+		ingressGroupUpstreams = append(ingressGroupUpstreams, upstream)
+	}
+
+	//sort by upstreams name
+	sort.SliceStable(ingressGroupUpstreams, func(i, j int) bool {
+		return ingressGroupUpstreams[i].Name < ingressGroupUpstreams[j].Name
+	})
+
+	return ingressGroupUpstreams
+}
+
+
+// createIngressGroupUpstreams creates the NGINX upstreams (Endpoints) for each Service
+// referenced in ingress group
+func (n *NGINXController) createIngressGroupUpstreams(data []*v1.IngressGroup) map[string]*ingress.Backend {
+	upstreams := make(map[string]*ingress.Backend)
+
+	for _, ingGroup := range data {
+
+		for _, serviceItem := range ingGroup.Spec.Services {
+			//upstreams name is namespaces-servicename-port
+			name := fmt.Sprintf("%v-%v-%v", serviceItem.Namespace, serviceItem.Name, serviceItem.Port)
+			//端口支持start
+			//name := fmt.Sprintf("%v-%v", serviceItem.Namespace, serviceItem.Name)
+			//端口支持end
+			
+			//if upstreams list is existed, then handle next service
+			if _, ok := upstreams[name]; ok {
+				continue
+			}
+
+			klog.V(3).Infof("creating upstream %v", name)
+
+			upstreams[name] = newUpstream(name)
+
+			svcKey := fmt.Sprintf("%v/%v", serviceItem.Namespace, serviceItem.Name)
+
+			if len(upstreams[name].Endpoints) == 0 {
+				endp, err := n.groupServiceEndpoints(svcKey, serviceItem.Port)
+				//端口支持start
+				//endp, err := n.groupServiceEndpoints(svcKey)
+				//端口支持end
+				if err != nil {
+					klog.Warningf("error obtaining service endpoints: %v", err)
+					continue
+				}
+				upstreams[name].Endpoints = endp
+			}
+
+			s, err := n.store.GetService(svcKey)
+			if err != nil {
+				klog.Warningf("error obtaining service: %v", err)
+				continue
+			}
+
+			upstreams[name].Service = s
+		}
+	}
+
+	return upstreams
+}
+
 // createUpstreams creates the NGINX upstreams (Endpoints) for each Service
 // referenced in Ingress rules.
 func (n *NGINXController) createUpstreams(data []*ingress.Ingress, du *ingress.Backend) map[string]*ingress.Backend {
@@ -902,6 +1002,52 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string) ([]ingres
 			upstreams = append(upstreams, endps...)
 			break
 		}
+	}
+
+	return upstreams, nil
+}
+
+func (n *NGINXController) groupServiceEndpoints(svcKey, backendPort string) ([]ingress.Endpoint, error) {
+//多端口支持 start
+//func (n *NGINXController) groupServiceEndpoints(svcKey string) ([]ingress.Endpoint, error) {
+//多端口支持 end
+	svc, err := n.store.GetService(svcKey)
+
+	var upstreams []ingress.Endpoint
+	if err != nil {
+		return upstreams, fmt.Errorf("error getting service %v from the cache: %v", svcKey, err)
+	}
+
+	klog.V(3).Infof("Obtaining ports information for Service %q", svcKey)
+	for _, servicePort := range svc.Spec.Ports {
+		//多端口支持start
+		if strconv.Itoa(int(servicePort.Port)) == backendPort ||
+			servicePort.TargetPort.String() == backendPort ||
+			servicePort.Name == backendPort {
+		//多端口支持end
+			endps := getEndpoints(svc, &servicePort, apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
+			if len(endps) == 0 {
+				klog.Warningf("Service %q does not have any active Endpoint.", svcKey)
+			}
+
+			sort.SliceStable(endps, func(i, j int) bool {
+				iName := endps[i].Address
+				jName := endps[j].Address
+				if iName != jName {
+					return iName < jName
+				}
+				return endps[i].Port < endps[j].Port
+			})
+
+			upstreams = append(upstreams, endps...)
+			break
+		}
+	}
+
+	rand.Seed(time.Now().UnixNano())
+	for i := range upstreams {
+		j := rand.Intn(i + 1)
+		upstreams[i], upstreams[j] = upstreams[j], upstreams[i]
 	}
 
 	return upstreams, nil

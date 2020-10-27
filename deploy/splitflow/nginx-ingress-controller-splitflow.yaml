@@ -1,0 +1,121 @@
+apiVersion: extensions/v1beta1
+kind: DaemonSet
+metadata:
+  labels:
+    app: ingress-nginx-splitflow
+  name: nginx-ingress-controller-splitflow
+  namespace: kube-system
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: ingress-nginx-splitflow
+  template:
+    metadata:
+      annotations:
+        prometheus.io/port: "10254"
+        prometheus.io/scrape: "true"
+      labels:
+        app: ingress-nginx-splitflow
+    spec:
+      containers:
+      - args:
+        - /nginx-ingress-controller
+        - --http-port=8080
+        - --https-port=8444
+        - --healthz-port=10258
+        - --status-port=18082
+        - --ingress-class=ingress-controller-splitflowyz
+        - --default-backend-service=$(POD_NAMESPACE)/default-http-backend
+        - --configmap=$(POD_NAMESPACE)/nginx-configuration
+        - --tcp-services-configmap=$(POD_NAMESPACE)/system-expose-nginx-config-tcp
+        - --udp-services-configmap=$(POD_NAMESPACE)/system-expose-nginx-config-udp
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        image: k8s-deploy/nginx-ingress-controller:0.24.1
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: 10254
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        name: nginx-ingress-controller
+        ports:
+        - containerPort: 80
+          hostPort: 80
+          name: http
+          protocol: TCP
+        - containerPort: 443
+          hostPort: 443
+          name: https
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: 10254
+            scheme: HTTP
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources: {}
+        securityContext:
+          capabilities:
+            add:
+            - NET_BIND_SERVICE
+            drop:
+            - ALL
+          procMount: Default
+          runAsUser: 33
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/log/nginx
+          name: logdir
+      dnsPolicy: ClusterFirst
+      hostNetwork: true
+      initContainers:
+      - command:
+        - chown
+        - -R
+        - www-data:www-data
+        - /var/log/nginx
+        image: k8s-deploy/busybox
+        imagePullPolicy: Always
+        name: init-nginx
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/log/nginx
+          name: logdir
+      nodeSelector:
+        lb: nginx
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: nginx-ingress-serviceaccount
+      serviceAccountName: nginx-ingress-serviceaccount
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - hostPath:
+          path: /var/log/ingress_log/default
+          type: ""
+        name: logdir
+  templateGeneration: 3
+  updateStrategy:
+    type: OnDelete

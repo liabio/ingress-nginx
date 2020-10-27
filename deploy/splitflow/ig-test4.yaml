@@ -1,0 +1,17 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  labels:
+    app: jmtcdup3
+    harmonycloud.cn/app: jmtcdup3
+    harmonycloud.cn/tenantId: 2e133a9ec2504e8897740390d8b5ed8e
+  name: split-test4
+  namespace: yizhiya-dev53
+spec:
+  rules:
+   - http:
+      paths:
+      - backend:
+          serviceName: split-nginx-old
+          servicePort: 80
+        path: /porttest

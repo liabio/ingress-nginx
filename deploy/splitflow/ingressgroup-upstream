@@ -1,0 +1,9 @@
+#HTTP services
+
+upstream zxl-test-splitflow-new-version {
+    server 10.168.177.171:8080 max_fails=0 fail_timeout=0;
+}
+
+upstream zxl-test-splitflow-old-version {
+    server 10.168.173.29:8080 max_fails=0 fail_timeout=0;
+}

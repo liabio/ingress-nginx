@@ -1,0 +1,10 @@
+{{ $all := . }}
+{{ $backends := .Backends }}
+
+# HTTP services
+{{ range $name, $upstream := $backends }}
+upstream {{ $upstream.Name }} {
+    {{ range $server := $upstream.Endpoints }} server {{ $server.Address | formatIP }}:{{ $server.Port }};
+    {{ end }}
+}
+{{ end }}
